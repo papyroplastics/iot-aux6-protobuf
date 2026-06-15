@@ -1,3 +1,33 @@
 syntax = "proto3";
-package iot
 
+package iot;
+
+enum State {
+  ACTIVE = 0;
+  PASSIVE = 1;
+  IDLE = 2;
+  SLEEP = 3;
+}
+
+message Data {
+  repeated float values = 1;
+}
+
+message Request {
+  string device = 1;
+  uint64 timestamp = 2;
+
+  oneof body {
+    uint32 ping = 3;
+    Data data = 4;
+    State state = 5;
+  }
+}
+
+message Response {
+  oneof body {
+    uint32 pong = 1;
+    float average = 2;
+    State new_state = 3;
+  }
+}

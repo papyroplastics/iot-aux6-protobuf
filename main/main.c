@@ -1,9 +1,11 @@
+#include <string.h>
 #include <unistd.h>
 #include <stdint.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
+#include <freertos/idf_additions.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
@@ -12,7 +14,13 @@
 #include <esp_event.h>
 #include <esp_system.h>
 #include <esp_random.h>
+#include <esp_task.h>
 #include <nvs_flash.h>
+
+#include "pb.h"
+#include "pb_decode.h"
+#include "pb_encode.h"
+#include "packet.pb.h"
 
 #include "credentials.h"
 
@@ -46,6 +54,41 @@ void event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, voi
       xSemaphoreGive(sem);
     }
   }
+}
+
+char* device_name = "esp-room-4";
+ 
+iot_Request get_request() {
+  iot_Request req = iot_Request_init_default;
+  strcpy(req.device, device_name);
+  req.timestamp = xTaskGetTickCount() * (1000 / configTICK_RATE_HZ);
+  return req;
+}
+
+bool send_request(int sock, const iot_Request* req, iot_Response* resp) {
+  uint8_t buf[iot_Request_size];
+  pb_ostream_t ostream = pb_ostream_from_buffer(buf, sizeof(buf));
+
+  if (!pb_encode(&ostream, &iot_Request_msg, req)) {
+    printf("error al codificar paquete\n");
+    return false;
+  }
+
+  uint32_t len = htonl(ostream.bytes_written);
+  send(sock, &len, sizeof(len), 0);
+  send(sock, &buf, ostream.bytes_written, 0);
+
+  recv(sock, &len, sizeof(len), MSG_WAITALL);
+  len = ntohl(len);
+  recv(sock, buf, len, MSG_WAITALL);
+
+  pb_istream_t istream = pb_istream_from_buffer(buf, len);
+  if (!pb_decode(&istream, &iot_Response_msg, resp)) {
+    printf("error al decodificar respuesta\n");
+    return false;
+  }
+
+  return true;
 }
 
 void app_main() {
@@ -101,29 +144,52 @@ void app_main() {
 
   int err = connect(sock, (struct sockaddr*)&server_addr, sizeof(server_addr));
   if (err != 0) {
-    printf("Error al conectarse con " SERVER_IP);
+    printf("Error al conectarse a " SERVER_IP "\n");
     close(sock);
-    return;
+    sleep(5);
+    esp_restart();
   }
-  printf("Conectado con el servidor en " SERVER_IP);
+  printf("Conectado con el servidor en " SERVER_IP "\n");
 
-  uint32_t buf[10];
-  uint32_t buf_len = (esp_random() % 8) + 2;
-  buf[0] = htonl(buf_len);
+  iot_Request req = get_request();
+  req.which_body = iot_Request_ping_tag;
+  req.body.ping = esp_random() % 100;
 
-  uint32_t expected = 0;
-  for (uint32_t j = 1; j <= buf_len; j++) {
-    uint32_t v = esp_random();
-    buf[j] = htonl(v);
-    expected += v;
+  printf("Enviando ping seq num: %ld\n", req.body.ping);
+
+  iot_Response resp = iot_Response_init_default;
+  if (send_request(sock, &req, &resp)) {
+    printf("Pong recibido num seq %ld\n", resp.body.pong);
   }
 
-  send(sock, buf, (buf_len + 1) * sizeof(uint32_t), 0);
-  printf("Array de %ld elementos enviado, suma esperada %lu, ", buf_len, expected);
+  // Datos
+  req = get_request();
+  req.which_body = iot_Request_data_tag;
 
-  uint32_t result;
-  recv(sock, &result, sizeof(result), MSG_WAITALL);
-  printf("suma recibida: %lu\n", ntohl(result));
+  iot_Data* data = &req.body.data;
+  data->values_count = (esp_random() % 5) + 3;
+
+  printf("Enviando datos:");
+  for (int i = 0; i < data->values_count; i++) {
+    data->values[i] = (esp_random() % 1000) / 10.0f;
+    printf(" %.1f", data->values[i]);
+  }
+  printf("\n");
+
+  if (send_request(sock, &req, &resp)) {
+    printf("Promedio recibido: %.1f\n", resp.body.average);
+  }
+
+  // Estado
+  req = get_request();
+  req.which_body = iot_Request_state_tag;
+  req.body.state = esp_random() % 4;
+
+  printf("Enviando estado %d\n", req.body.state);
+
+  if (send_request(sock, &req, &resp)) {
+    printf("Nuevo estado recibido num seq %ld\n", resp.body.pong);
+  }
 
   close(sock);
   sleep(5);

@@ -1,0 +1,2 @@
+iot.Request.device  max_size:16
+iot.Data.values     max_count:8
